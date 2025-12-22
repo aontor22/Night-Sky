@@ -43,7 +43,7 @@ export interface Particle {
   vx: number;
   vy: number;
   alpha: number;
-  color: string;
+  hue: number; // Changed from color string to hue for dynamic lighting
   decay: number;
   size: number;
   flicker: boolean;

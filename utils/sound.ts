@@ -2,28 +2,28 @@ export class SoundManager {
   private context: AudioContext | null = null;
   private buffers: Map<string, AudioBuffer> = new Map();
   private muted: boolean = false;
-  private noiseBuffer: AudioBuffer | null = null;
+  private masterGain: GainNode | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioContextClass) {
         this.context = new AudioContextClass();
-        this.generateNoiseBuffer();
+        this.masterGain = this.context.createGain();
+        this.masterGain.connect(this.context.destination);
+        // Compressor to glue sounds together and prevent clipping
+        const compressor = this.context.createDynamicsCompressor();
+        compressor.threshold.value = -24;
+        compressor.knee.value = 30;
+        compressor.ratio.value = 12;
+        compressor.attack.value = 0.003;
+        compressor.release.value = 0.25;
+        
+        this.masterGain.disconnect();
+        this.masterGain.connect(compressor);
+        compressor.connect(this.context.destination);
       }
     }
-  }
-
-  // Generate white noise buffer for synthetic explosions
-  private generateNoiseBuffer() {
-    if (!this.context) return;
-    const bufferSize = this.context.sampleRate * 2; // 2 seconds
-    const buffer = this.context.createBuffer(1, bufferSize, this.context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = Math.random() * 2 - 1;
-    }
-    this.noiseBuffer = buffer;
   }
 
   async init() {
@@ -53,8 +53,12 @@ export class SoundManager {
 
   setMuted(muted: boolean) {
     this.muted = muted;
-    if (!muted && this.context?.state === 'suspended') {
-      this.context.resume();
+    if (this.context) {
+      if (muted) {
+        this.context.suspend();
+      } else {
+        this.context.resume();
+      }
     }
   }
 
@@ -64,91 +68,168 @@ export class SoundManager {
     }
   }
 
+  private createNoiseBuffer(): AudioBuffer {
+    if (!this.context) throw new Error("No context");
+    const bufferSize = this.context.sampleRate * 2; // 2 seconds
+    const buffer = this.context.createBuffer(1, bufferSize, this.context.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    return buffer;
+  }
+
   playLaunch() {
-    if (this.muted || !this.context) return;
+    if (this.muted || !this.context || !this.masterGain) return;
 
     if (this.buffers.has('launch')) {
       this.playBuffer('launch', 0.8 + Math.random() * 0.4, 0.3);
     } else {
-      // Synthetic Launch: Whistle up
+      // Improved Synthetic Launch: "Whoosh"
       const t = this.context.currentTime;
       const osc = this.context.createOscillator();
       const gain = this.context.createGain();
+      
+      // Noise layer for air resistance sound
+      const noise = this.context.createBufferSource();
+      noise.buffer = this.createNoiseBuffer();
+      const noiseGain = this.context.createGain();
+      const noiseFilter = this.context.createBiquadFilter();
+      noiseFilter.type = 'bandpass';
+      noiseFilter.Q.value = 1;
 
       osc.connect(gain);
-      gain.connect(this.context.destination);
+      gain.connect(this.masterGain);
 
-      osc.frequency.setValueAtTime(200, t);
-      osc.frequency.exponentialRampToValueAtTime(800, t + 0.3);
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(this.masterGain);
+
+      // Pitch Sweep
+      osc.frequency.setValueAtTime(150, t);
+      osc.frequency.exponentialRampToValueAtTime(600, t + 0.5);
       
-      gain.gain.setValueAtTime(0.1, t);
-      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+      // Filter Sweep
+      noiseFilter.frequency.setValueAtTime(400, t);
+      noiseFilter.frequency.exponentialRampToValueAtTime(1200, t + 0.5);
+
+      // Volume Envelope
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.1, t + 0.1);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+
+      noiseGain.gain.setValueAtTime(0, t);
+      noiseGain.gain.linearRampToValueAtTime(0.05, t + 0.1);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
 
       osc.start(t);
-      osc.stop(t + 0.3);
+      osc.stop(t + 0.5);
+      noise.start(t);
+      noise.stop(t + 0.5);
     }
   }
 
   playExplosion(intensity: number = 1) {
-    if (this.muted || !this.context) return;
+    if (this.muted || !this.context || !this.masterGain) return;
 
     if (this.buffers.has('explode')) {
-      // Vary playback rate for size: larger = lower pitch
       const rate = 1.2 - (intensity * 0.4) + (Math.random() * 0.2 - 0.1);
       this.playBuffer('explode', rate, 0.5 * intensity);
     } else {
-      // Synthetic Explosion: Filtered Noise
+      // Improved Realistic Explosion
       const t = this.context.currentTime;
-      const noise = this.context.createBufferSource();
-      noise.buffer = this.noiseBuffer;
       
-      const filter = this.context.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(800, t);
-      filter.frequency.exponentialRampToValueAtTime(10, t + 1);
+      // 1. The "Thud" (Low frequency impact)
+      const osc = this.context.createOscillator();
+      const oscGain = this.context.createGain();
+      osc.connect(oscGain);
+      oscGain.connect(this.masterGain);
+      
+      osc.frequency.setValueAtTime(120, t);
+      osc.frequency.exponentialRampToValueAtTime(40, t + 0.15);
+      
+      oscGain.gain.setValueAtTime(0.8 * intensity, t);
+      oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
 
-      const gain = this.context.createGain();
-      gain.gain.setValueAtTime(0.3 * intensity, t);
-      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.8);
+      osc.start(t);
+      osc.stop(t + 0.2);
 
-      noise.connect(filter);
-      filter.connect(gain);
-      gain.connect(this.context.destination);
+      // 2. The "Crack" (High impact noise)
+      const crack = this.context.createBufferSource();
+      crack.buffer = this.createNoiseBuffer();
+      const crackFilter = this.context.createBiquadFilter();
+      crackFilter.type = 'lowpass';
+      crackFilter.frequency.value = 3000;
+      const crackGain = this.context.createGain();
+      
+      crack.connect(crackFilter);
+      crackFilter.connect(crackGain);
+      crackGain.connect(this.masterGain);
 
-      noise.start(t);
-      noise.stop(t + 1);
+      crackGain.gain.setValueAtTime(0.5 * intensity, t);
+      crackGain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+      
+      crack.start(t);
+      crack.stop(t + 0.1);
+
+      // 3. The "Rumble" (Long decay low noise)
+      const rumble = this.context.createBufferSource();
+      rumble.buffer = this.createNoiseBuffer();
+      const rumbleFilter = this.context.createBiquadFilter();
+      rumbleFilter.type = 'lowpass';
+      const rumbleGain = this.context.createGain();
+
+      rumble.connect(rumbleFilter);
+      rumbleFilter.connect(rumbleGain);
+      rumbleGain.connect(this.masterGain);
+
+      rumbleFilter.frequency.setValueAtTime(800, t);
+      rumbleFilter.frequency.exponentialRampToValueAtTime(50, t + 1.5);
+
+      rumbleGain.gain.setValueAtTime(0.4 * intensity, t);
+      rumbleGain.gain.exponentialRampToValueAtTime(0.001, t + 2.0);
+
+      rumble.start(t);
+      rumble.stop(t + 2.0);
     }
   }
 
   playCrackle() {
-    if (this.muted || !this.context) return;
+    if (this.muted || !this.context || !this.masterGain) return;
 
     if (this.buffers.has('crackle')) {
       this.playBuffer('crackle', 1, 0.2);
     } else {
-      // Synthetic Crackle: Short high freq bursts
+      // Synthetic Crackle: Randomized high-pass pops
       const t = this.context.currentTime;
-      // We'll create a few random pops
-      for (let i = 0; i < 5; i++) {
-        const offset = Math.random() * 0.5;
-        const osc = this.context.createOscillator();
-        const gain = this.context.createGain();
-        osc.type = 'square';
-        osc.connect(gain);
-        gain.connect(this.context.destination);
+      const count = 4 + Math.floor(Math.random() * 4);
+      
+      for (let i = 0; i < count; i++) {
+        const offset = Math.random() * 0.4;
         
-        osc.frequency.setValueAtTime(800 + Math.random() * 400, t + offset);
+        const noise = this.context.createBufferSource();
+        noise.buffer = this.createNoiseBuffer();
+        
+        const filter = this.context.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.value = 1000 + Math.random() * 1000;
+        
+        const gain = this.context.createGain();
         gain.gain.setValueAtTime(0.05, t + offset);
         gain.gain.exponentialRampToValueAtTime(0.001, t + offset + 0.05);
+
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(this.masterGain);
         
-        osc.start(t + offset);
-        osc.stop(t + offset + 0.05);
+        noise.start(t + offset);
+        noise.stop(t + offset + 0.05);
       }
     }
   }
 
   private playBuffer(key: string, rate: number, vol: number) {
-    if (!this.context) return;
+    if (!this.context || !this.masterGain) return;
     const source = this.context.createBufferSource();
     source.buffer = this.buffers.get(key)!;
     source.playbackRate.value = rate;
@@ -157,7 +238,7 @@ export class SoundManager {
     gain.gain.value = vol;
 
     source.connect(gain);
-    gain.connect(this.context.destination);
+    gain.connect(this.masterGain);
     source.start(0);
   }
 }
